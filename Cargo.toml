@@ -1,0 +1,7 @@
+[package]
+name = "symon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nvml-wrapper = "0.10.0"
