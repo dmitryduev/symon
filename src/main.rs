@@ -1,68 +1,160 @@
-use futures::future::join_all;
-use nvml_wrapper::bitmasks::InitFlags;
-use nvml_wrapper::Nvml;
+use nvml_wrapper::{bitmasks::InitFlags, enum_wrappers::device::TemperatureSensor, Nvml};
 use serde_json::json;
-use std::time::Instant;
-use tokio;
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-async fn attach_and_collect_device_stats(nvml: &Nvml, index: u32) -> serde_json::Value {
-    let device = nvml.device_by_index(index).unwrap();
-    let mut stats = serde_json::Map::new();
-
-    // Collect various stats
-    stats.insert("name".to_string(), json!(device.name().unwrap()));
-
-    if let Ok(utilization) = device.utilization_rates() {
-        stats.insert("gpu_utilization".to_string(), json!(utilization.gpu));
-        stats.insert("memory_utilization".to_string(), json!(utilization.memory));
-    }
-
-    if let Ok(memory) = device.memory_info() {
-        stats.insert("memory_total".to_string(), json!(memory.total));
-        stats.insert("memory_used".to_string(), json!(memory.used));
-    }
-
-    if let Ok(temperature) =
-        device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
-    {
-        stats.insert("temperature".to_string(), json!(temperature));
-    }
-
-    json!({
-        format!("gpu_{}", index): stats
-    })
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let start = Instant::now();
-
-    let nvml = Nvml::init_with_flags(InitFlags::NO_ATTACH)?;
-
-    println!(
-        "NVML initialization took {} ms",
-        start.elapsed().as_millis()
-    );
+fn sample_metrics(
+    nvml: &Nvml,
+) -> Result<BTreeMap<String, serde_json::Value>, nvml_wrapper::error::NvmlError> {
+    let start_time = Instant::now();
+    let mut metrics = BTreeMap::new();
 
     let device_count = nvml.device_count()?;
-    println!("Found {} devices", device_count);
+    metrics.insert("gpu.count".to_string(), json!(device_count));
 
-    let futures = (0..device_count).map(|index| attach_and_collect_device_stats(&nvml, index));
-    let results = join_all(futures).await;
+    for di in 0..device_count {
+        let device = nvml.device_by_index(di)?;
 
-    let mut combined_stats = serde_json::Map::new();
-    for result in results {
-        combined_stats.extend(result.as_object().unwrap().clone());
+        let name = device.name()?;
+        metrics.insert(format!("gpu.{}.name", di), json!(name));
+
+        let brand = device.brand()?;
+        metrics.insert(format!("gpu.{}.brand", di), json!(format!("{:?}", brand)));
+
+        if let Ok(fan_speed) = device.fan_speed(0) {
+            metrics.insert(format!("gpu.{}.fanSpeed", di), json!(fan_speed));
+        }
+
+        if let Ok(encoder_util) = device.encoder_utilization() {
+            metrics.insert(
+                format!("gpu.{}.encoderUtilization", di),
+                json!(encoder_util.utilization),
+            );
+        }
+
+        let utilization = device.utilization_rates()?;
+        metrics.insert(format!("gpu.{}.gpu", di), json!(utilization.gpu));
+        metrics.insert(format!("gpu.{}.memory", di), json!(utilization.memory));
+
+        let memory_info = device.memory_info()?;
+        metrics.insert(format!("gpu.{}.memoryTotal", di), json!(memory_info.total));
+        let memory_allocated = (memory_info.used as f64 / memory_info.total as f64) * 100.0;
+        metrics.insert(
+            format!("gpu.{}.memoryAllocated", di),
+            json!(memory_allocated),
+        );
+        metrics.insert(
+            format!("gpu.{}.memoryAllocatedBytes", di),
+            json!(memory_info.used),
+        );
+
+        let temperature = device.temperature(TemperatureSensor::Gpu)?;
+        metrics.insert(format!("gpu.{}.temp", di), json!(temperature));
+
+        let power_usage = device.power_usage()? as f64 / 1000.0;
+        metrics.insert(format!("gpu.{}.powerWatts", di), json!(power_usage));
+
+        if let Ok(power_limit) = device.enforced_power_limit() {
+            let power_limit = power_limit as f64 / 1000.0;
+            metrics.insert(
+                format!("gpu.{}.enforcedPowerLimitWatts", di),
+                json!(power_limit),
+            );
+            let power_percent = (power_usage / power_limit) * 100.0;
+            metrics.insert(format!("gpu.{}.powerPercent", di), json!(power_percent));
+        }
+
+        let graphics_clock =
+            device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics)?;
+        metrics.insert(format!("gpu.{}.graphicsClock", di), json!(graphics_clock));
+
+        let mem_clock = device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Memory)?;
+        metrics.insert(format!("gpu.{}.memoryClock", di), json!(mem_clock));
+
+        // let pci_info = device.pci_info()?;
+        // metrics.insert(
+        //     format!("gpu.{}.pcieLinkGen", di),
+        //     json!(pci_info.link_gen.current),
+        // );
+        // metrics.insert(
+        //     format!("gpu.{}.pcieLinkWidth", di),
+        //     json!(pci_info.link_width.current),
+        // );
+
+        let cuda_cores = device.num_cores()?;
+        metrics.insert(format!("gpu.{}.cudaCores", di), json!(cuda_cores));
+
+        let architecture = device.architecture()?;
+        metrics.insert(
+            format!("gpu.{}.architecture", di),
+            json!(format!("{:?}", architecture)),
+        );
     }
 
-    combined_stats.insert(
-        "total_time_ms".to_string(),
-        json!(start.elapsed().as_millis()),
+    let sampling_duration = start_time.elapsed();
+    metrics.insert(
+        "_sampling_duration_ms".to_string(),
+        json!(sampling_duration.as_millis()),
     );
 
-    println!("{}", serde_json::to_string_pretty(&combined_stats)?);
+    Ok(metrics)
+}
 
-    Ok(())
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let program_start = Instant::now();
+
+    let nvml_init_start = Instant::now();
+    let nvml = Nvml::init_with_flags(InitFlags::NO_ATTACH)?;
+    let nvml_init_duration = nvml_init_start.elapsed();
+
+    println!(
+        "NVML initialization time: {} ms",
+        nvml_init_duration.as_millis()
+    );
+    println!(
+        "Total startup time: {} ms",
+        program_start.elapsed().as_millis()
+    );
+
+    let cuda_version = nvml.sys_cuda_driver_version()?;
+    let cuda_version = format!(
+        "{}.{}",
+        nvml_wrapper::cuda_driver_version_major(cuda_version),
+        nvml_wrapper::cuda_driver_version_minor(cuda_version)
+    );
+
+    loop {
+        let sampling_start = Instant::now();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        match sample_metrics(&nvml) {
+            Ok(mut gpu_metrics) => {
+                gpu_metrics.insert("_timestamp".to_string(), json!(timestamp));
+                gpu_metrics.insert("cuda_version".to_string(), json!(cuda_version));
+
+                let serialization_start = Instant::now();
+                let json_output = serde_json::to_string(&gpu_metrics)?;
+                let serialization_duration = serialization_start.elapsed();
+
+                println!("{}", json_output);
+                println!(
+                    "Serialization time: {} ms",
+                    serialization_duration.as_millis()
+                );
+            }
+            Err(e) => eprintln!("Error sampling metrics: {:?}", e),
+        }
+
+        let loop_duration = sampling_start.elapsed();
+        println!("Total loop time: {} ms", loop_duration.as_millis());
+
+        if loop_duration < Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_secs(1) - loop_duration);
+        }
+    }
 }
 
 // use nvml_wrapper::bitmasks::InitFlags;
