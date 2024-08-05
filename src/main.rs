@@ -1,3 +1,4 @@
+use nix::unistd::getppid;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Device, Nvml};
@@ -210,7 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         flag::register(*sig, Arc::clone(&running))?;
     }
 
-    let parent_pid = std::process::id();
+    let parent_pid = getppid();
 
     while running.load(Ordering::Relaxed) {
         let sampling_start = Instant::now();
@@ -249,7 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Check if parent process is still alive
-        if std::process::id() == parent_pid {
+        if getppid() == parent_pid {
             println!("Parent process terminated. Shutting down...");
             break;
         }
