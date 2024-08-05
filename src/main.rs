@@ -1,16 +1,16 @@
-use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
+use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{cuda_driver_version_major, cuda_driver_version_minor, Device, Nvml};
 use serde::Serialize;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize)]
 struct GpuMetrics {
     #[serde(flatten)]
-    metrics: HashMap<String, serde_json::Value>,
+    metrics: BTreeMap<String, serde_json::Value>,
 }
 
 fn get_child_pids(pid: i32) -> Vec<i32> {
@@ -40,8 +40,11 @@ fn gpu_in_use_by_process(device: &Device, pid: i32) -> bool {
     our_pids.iter().any(|&p| device_pids.contains(&p))
 }
 
-fn sample_metrics(nvml: &Nvml, pid: i32) -> Result<GpuMetrics, NvmlError> {
-    let mut metrics = HashMap::new();
+fn sample_metrics(nvml: &Nvml, pid: i32, cuda_version: String) -> Result<GpuMetrics, NvmlError> {
+    let start_time = Instant::now();
+    let mut metrics = BTreeMap::new();
+
+    metrics.insert("cuda_version".to_string(), json!(cuda_version));
 
     let device_count = nvml.device_count()?;
     metrics.insert("gpu.count".to_string(), json!(device_count));
@@ -122,11 +125,22 @@ fn sample_metrics(nvml: &Nvml, pid: i32) -> Result<GpuMetrics, NvmlError> {
         }
     }
 
+    let sampling_duration = start_time.elapsed();
+    metrics.insert(
+        "_sampling_duration_ms".to_string(),
+        json!(sampling_duration.as_millis()),
+    );
+
     Ok(GpuMetrics { metrics })
 }
 
 fn main() -> Result<(), NvmlError> {
+    let program_start = Instant::now();
+
+    let nvml_init_start = Instant::now();
     let nvml = Nvml::init()?;
+    let nvml_init_duration = nvml_init_start.elapsed();
+
     let pid = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "0".to_string())
@@ -134,27 +148,48 @@ fn main() -> Result<(), NvmlError> {
         .unwrap_or(0);
 
     let cuda_version = nvml.sys_cuda_driver_version()?;
-    println!(
-        "CUDA Version: {}.{}",
+    let cuda_version = format!(
+        "{}.{}",
         cuda_driver_version_major(cuda_version),
         cuda_driver_version_minor(cuda_version)
     );
 
+    println!(
+        "NVML initialization time: {} ms",
+        nvml_init_duration.as_millis()
+    );
+    println!(
+        "Total startup time: {} ms",
+        program_start.elapsed().as_millis()
+    );
+
     loop {
+        let sampling_start = Instant::now();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        match sample_metrics(&nvml, pid) {
+        match sample_metrics(&nvml, pid, cuda_version.clone()) {
             Ok(mut gpu_metrics) => {
                 gpu_metrics
                     .metrics
                     .insert("_timestamp".to_string(), json!(timestamp));
-                println!("{}", serde_json::to_string(&gpu_metrics.metrics).unwrap());
+                let serialization_start = Instant::now();
+                let json_output = serde_json::to_string(&gpu_metrics.metrics).unwrap();
+                let serialization_duration = serialization_start.elapsed();
+                gpu_metrics.metrics.insert(
+                    "_serialization_duration_ms".to_string(),
+                    json!(serialization_duration.as_millis()),
+                );
+                println!("{}", json_output);
             }
             Err(e) => eprintln!("Error sampling metrics: {:?}", e),
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        let loop_duration = sampling_start.elapsed();
+        println!("Total loop time: {} ms", loop_duration.as_millis());
+        if loop_duration < Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_secs(1) - loop_duration);
+        }
     }
 }
 
