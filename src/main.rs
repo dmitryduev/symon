@@ -1,3 +1,4 @@
+use nvml_wrapper::bitmasks::InitFlags;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Device, Nvml};
@@ -184,7 +185,7 @@ fn sample_metrics(nvml: &Nvml, pid: i32, cuda_version: String) -> Result<GpuMetr
 
 fn main() {
     let nvml_init_start = Instant::now();
-    let nvml_result = nvml_wrapper::Nvml::init();
+    let nvml_result = nvml_wrapper::Nvml::init_with_flags(InitFlags::NO_ATTACH);
     let nvml_init_duration = nvml_init_start.elapsed();
 
     let pid = std::env::args()
