@@ -4,6 +4,7 @@ use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Device, Nvml};
 use serde::Serialize;
 use serde_json::json;
+use signal_hook::flag as signal_flag;
 use signal_hook::{consts::TERM_SIGNALS, flag};
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -197,7 +198,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "0".to_string())
         .parse()
         .unwrap_or(0);
-    println!("PID: {:?}", pid);
 
     println!(
         "NVML initialization time: {} ms",
@@ -205,15 +205,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let running = Arc::new(AtomicBool::new(true));
-    let _r = running.clone();
 
     // Set up signal handlers
-    for sig in TERM_SIGNALS {
-        flag::register(*sig, Arc::clone(&running))?;
-    }
+    signal_flag::register(SIGINT, Arc::clone(&running))?;
+    signal_flag::register(SIGTERM, Arc::clone(&running))?;
 
     let parent_pid = getppid();
-    println!("Parent PID: {:?}", parent_pid);
 
     while running.load(Ordering::Relaxed) {
         let sampling_start = Instant::now();
