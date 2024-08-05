@@ -198,11 +198,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(0);
 
-    println!(
-        "NVML initialization time: {} ms",
-        nvml_init_duration.as_millis()
-    );
-
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
 
@@ -210,7 +205,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut signals = Signals::new(TERM_SIGNALS)?;
     thread::spawn(move || {
         for sig in signals.forever() {
-            println!("Received signal {:?}", sig);
             r.store(false, Ordering::Relaxed);
             break;
         }
@@ -258,7 +252,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("Shutting down gracefully...");
     nvml_result.ok().map(|nvml| nvml.shutdown());
 
     Ok(())
