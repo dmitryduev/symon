@@ -30,6 +30,8 @@ fn main() -> Result<(), NvmlError> {
     let nvml = Arc::new(init_nvml()?);
     let device_count = nvml.device_count()?;
 
+    println!("Found {} devices", device_count);
+
     let mut handles = vec![];
 
     for i in 0..device_count {
