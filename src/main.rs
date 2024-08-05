@@ -1,6 +1,6 @@
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::error::NvmlError;
-use nvml_wrapper::{cuda_driver_version_major, cuda_driver_version_minor, Device, Nvml};
+use nvml_wrapper::{Device, Nvml};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
