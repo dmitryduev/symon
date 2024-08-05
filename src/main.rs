@@ -1,11 +1,14 @@
-use nvml_wrapper::bitmasks::InitFlags;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Device, Nvml};
 use serde::Serialize;
 use serde_json::json;
+use signal_hook::{consts::TERM_SIGNALS, flag};
 use std::collections::BTreeMap;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize)]
@@ -183,9 +186,8 @@ fn sample_metrics(nvml: &Nvml, pid: i32, cuda_version: String) -> Result<GpuMetr
     Ok(GpuMetrics { metrics })
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let nvml_init_start = Instant::now();
-    // let nvml_result = nvml_wrapper::Nvml::init_with_flags(InitFlags::NO_ATTACH);
     let nvml_result = nvml_wrapper::Nvml::init();
     let nvml_init_duration = nvml_init_start.elapsed();
 
@@ -200,7 +202,17 @@ fn main() {
         nvml_init_duration.as_millis()
     );
 
-    loop {
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    // Set up signal handlers
+    for sig in TERM_SIGNALS {
+        flag::register(*sig, Arc::clone(&running))?;
+    }
+
+    let parent_pid = std::process::id();
+
+    while running.load(Ordering::Relaxed) {
         let sampling_start = Instant::now();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -233,9 +245,20 @@ fn main() {
 
         let loop_duration = sampling_start.elapsed();
         if loop_duration < Duration::from_secs(1) {
-            std::thread::sleep(Duration::from_secs(1) - loop_duration);
+            thread::sleep(Duration::from_secs(1) - loop_duration);
+        }
+
+        // Check if parent process is still alive
+        if std::process::id() == parent_pid {
+            println!("Parent process terminated. Shutting down...");
+            break;
         }
     }
+
+    println!("Shutting down gracefully...");
+    // Add any cleanup code here if necessary
+
+    Ok(())
 }
 
 // use std::env;
