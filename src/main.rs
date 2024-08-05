@@ -12,12 +12,54 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/*
+This code provides a comprehensive set of GPU metrics,
+including both general GPU information and process-specific
+metrics when applicable. It's designed to run continuously,
+sampling metrics with a requested cadence, and can be
+gracefully shut down using termination signals.
+*/
+
+// Struct to hold GPU metrics. Metrics are stored in a BTreeMap to ensure
+// consistent ordering of keys in the output JSON.
+// The output map is flat to make it easier to parse in downstream applications.
+// cuda_version: The version of CUDA installed on the system.
+// gpu.count: The total number of GPUs detected in the system.
+// gpu.{i}.name: The name of the GPU at index i (e.g., Tesla T4).
+// gpu.{i}.brand: The brand of the GPU at index i (e.g., GeForce, Nvidia).
+// gpu.{i}.fanSpeed: The current fan speed of the GPU at index i (in percentage).
+// gpu.{i}.encoderUtilization: The utilization of the GPU's encoder at index i (in percentage).
+// gpu.{i}.gpu: The overall GPU utilization at index i (in percentage).
+// gpu.{i}.memory: The GPU memory utilization at index i (in percentage).
+// gpu.{i}.memoryTotal: The total memory of the GPU at index i (in bytes).
+// gpu.{i}.memoryAllocated: The percentage of GPU memory allocated at index i.
+// gpu.{i}.memoryAllocatedBytes: The amount of GPU memory allocated at index i (in bytes).
+// gpu.{i}.temp: The temperature of the GPU at index i (in Celsius).
+// gpu.{i}.powerWatts: The power consumption of the GPU at index i (in Watts).
+// gpu.{i}.enforcedPowerLimitWatts: The enforced power limit of the GPU at index i (in Watts).
+// gpu.{i}.powerPercent: The percentage of power limit being used by the GPU at index i.
+// gpu.{i}.graphicsClock: The current graphics clock speed of the GPU at index i (in MHz).
+// gpu.{i}.memoryClock: The current memory clock speed of the GPU at index i (in MHz).
+// gpu.{i}.pcieLinkGen: The current PCIe link generation of the GPU at index i.
+// gpu.{i}.pcieLinkSpeed: The current PCIe link speed of the GPU at index i (in bits per second).
+// gpu.{i}.pcieLinkWidth: The current PCIe link width of the GPU at index i.
+// gpu.{i}.maxPcieLinkGen: The maximum PCIe link generation supported by the GPU at index i.
+// gpu.{i}.maxPcieLinkWidth: The maximum PCIe link width supported by the GPU at index i.
+// gpu.{i}.cudaCores: The number of CUDA cores in the GPU at index i.
+// gpu.{i}.architecture: The architecture of the GPU at index i (e.g., Ampere, Turing).
+// gpu.process.{i}.*: Various metrics specific to the monitored process 
+//    (if the GPU is in use by the process). These include GPU utilization, memory utilization, 
+//     temperature, and power consumption.
+// _timestamp: The Unix timestamp when the metrics were collected.
+
+// Note that {i} represents the index of each GPU in the system, starting from 0.
 #[derive(Serialize)]
 struct GpuMetrics {
     #[serde(flatten)]
     metrics: BTreeMap<String, serde_json::Value>,
 }
 
+// Function to get child process IDs for a given parent PID
 fn get_child_pids(pid: i32) -> Vec<i32> {
     let output = Command::new("pgrep")
         .args(&["-P", &pid.to_string()])
@@ -30,6 +72,7 @@ fn get_child_pids(pid: i32) -> Vec<i32> {
         .collect()
 }
 
+// Function to check if a GPU is being used by a specific process or its children
 fn gpu_in_use_by_process(device: &Device, pid: i32) -> bool {
     let our_pids: Vec<i32> = std::iter::once(pid).chain(get_child_pids(pid)).collect();
 
@@ -45,12 +88,13 @@ fn gpu_in_use_by_process(device: &Device, pid: i32) -> bool {
     our_pids.iter().any(|&p| device_pids.contains(&p))
 }
 
+// Fallback function to return minimal metrics when NVML fails
 fn sample_metrics_fallback() -> GpuMetrics {
     let mut metrics = BTreeMap::new();
     metrics.insert("gpu.count".to_string(), json!(0));
     GpuMetrics { metrics }
 }
-
+// Main function to sample GPU metrics
 fn sample_metrics(nvml: &Nvml, pid: i32, cuda_version: String) -> Result<GpuMetrics, NvmlError> {
     let mut metrics = BTreeMap::new();
 
@@ -188,9 +232,7 @@ fn sample_metrics(nvml: &Nvml, pid: i32, cuda_version: String) -> Result<GpuMetr
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let nvml_init_start = Instant::now();
     let nvml_result = nvml_wrapper::Nvml::init();
-    let nvml_init_duration = nvml_init_start.elapsed();
 
     let pid = std::env::args()
         .nth(1)
@@ -198,10 +240,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(0);
 
+    // Set up a flag to control the main sampling loop
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
 
-    // Set up signal handler
+    // Set up signal handler for graceful shutdown
     let mut signals = Signals::new(TERM_SIGNALS)?;
     thread::spawn(move || {
         for sig in signals.forever() {
@@ -217,6 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap()
             .as_secs_f64();
 
+        // Sample GPU metrics
         let mut gpu_metrics = match &nvml_result {
             Ok(nvml) => match nvml.sys_cuda_driver_version() {
                 Ok(cuda_version) => {
@@ -235,12 +279,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(_) => sample_metrics_fallback(),
         };
 
+        // Add timestamp to metrics
         gpu_metrics
             .metrics
             .insert("_timestamp".to_string(), json!(timestamp));
+
+        // Convert metrics to JSON and print to stdout for collection
         let json_output = serde_json::to_string(&gpu_metrics.metrics).unwrap();
         println!("{}", json_output);
 
+        // Sleep to maintain requested sampling interval
         let loop_duration = sampling_start.elapsed();
         if loop_duration < Duration::from_secs(1) {
             thread::sleep(Duration::from_secs(1) - loop_duration);
@@ -252,6 +300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Graceful shutdown of NVML
     nvml_result.ok().map(|nvml| nvml.shutdown());
 
     Ok(())
