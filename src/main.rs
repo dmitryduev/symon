@@ -4,8 +4,7 @@ use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Device, Nvml};
 use serde::Serialize;
 use serde_json::json;
-use signal_hook::consts::{SIGINT, SIGTERM};
-use signal_hook::flag as signal_flag;
+use signal_hook::{consts::TERM_SIGNALS, iterator::Signals};
 use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -205,12 +204,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
 
-    // Set up signal handlers
-    signal_flag::register(SIGINT, Arc::clone(&running))?;
-    signal_flag::register(SIGTERM, Arc::clone(&running))?;
-
-    let parent_pid = getppid();
+    // Set up signal handler
+    let mut signals = Signals::new(TERM_SIGNALS)?;
+    thread::spawn(move || {
+        for sig in signals.forever() {
+            println!("Received signal {:?}", sig);
+            r.store(false, Ordering::Relaxed);
+            break;
+        }
+    });
 
     while running.load(Ordering::Relaxed) {
         let sampling_start = Instant::now();
