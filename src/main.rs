@@ -254,44 +254,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Check if parent process is still alive
         if getppid() == nix::unistd::Pid::from_raw(pid) {
-            println!("Parent process terminated. Shutting down...");
             break;
         }
     }
 
     println!("Shutting down gracefully...");
-    // Add any cleanup code here if necessary
+    nvml_result.ok().map(|nvml| nvml.shutdown());
 
     Ok(())
 }
-
-// use std::env;
-// use std::net::TcpStream;
-// use std::sync::{Arc, Mutex};
-// use std::thread;
-// use std::time::Duration;
-
-// fn receive_message(stream: Arc<Mutex<TcpStream>>) {
-//     loop {
-//         // sleep for 1 second, then just print something for now
-//         thread::sleep(Duration::from_secs(1));
-//         println!("Hello from receive_message");
-//     }
-// }
-
-// fn main() {
-//     let args: Vec<String> = env::args().collect();
-
-//     let port: u16 = args[1].parse().expect("Port must be a number");
-//     println!("{}", port);
-
-//     let stream = TcpStream::connect(("localhost", port)).unwrap();
-//     let stream = Arc::new(Mutex::new(stream));
-//     let stream_clone = stream.clone();
-
-//     let rx = thread::spawn(move || {
-//         receive_message(stream_clone);
-//     });
-
-//     thread::sleep(Duration::from_secs(5));
-// }
