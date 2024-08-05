@@ -197,6 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "0".to_string())
         .parse()
         .unwrap_or(0);
+    println!("PID: {:?}", pid);
 
     println!(
         "NVML initialization time: {} ms",
@@ -204,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
+    let _r = running.clone();
 
     // Set up signal handlers
     for sig in TERM_SIGNALS {
@@ -212,6 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let parent_pid = getppid();
+    println!("Parent PID: {:?}", parent_pid);
 
     while running.load(Ordering::Relaxed) {
         let sampling_start = Instant::now();
@@ -250,7 +252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Check if parent process is still alive
-        if getppid() == parent_pid {
+        if getppid() == nix::unistd::Pid::from_raw(pid) {
             println!("Parent process terminated. Shutting down...");
             break;
         }
