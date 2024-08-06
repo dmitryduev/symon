@@ -1,3 +1,8 @@
+//! NVIDIA GPU Metrics Monitor
+//!
+//! This program continuosly collects and prints to stdout GPU metrics using NVML.
+
+use clap::Parser;
 use nix::unistd::getppid;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::error::NvmlError;
@@ -12,54 +17,61 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/*
-This code provides a comprehensive set of GPU metrics,
-including both general GPU information and process-specific
-metrics when applicable. It's designed to run continuously,
-sampling metrics with a requested cadence, and can be
-gracefully shut down using termination signals.
-*/
+// Define command-line arguments
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Parent process ID. Used to:
+    /// - Monitor GPU metrics such as utilization and memory usage by the process and its children.
+    /// - Gracefully exit when the parent process is no longer running.
+    #[arg(short, long, default_value_t = 0)]
+    pid: i32,
 
-// Struct to hold GPU metrics. Metrics are stored in a BTreeMap to ensure
-// consistent ordering of keys in the output JSON.
-// The output map is flat to make it easier to parse in downstream applications.
-// cuda_version: The version of CUDA installed on the system.
-// gpu.count: The total number of GPUs detected in the system.
-// gpu.{i}.name: The name of the GPU at index i (e.g., Tesla T4).
-// gpu.{i}.brand: The brand of the GPU at index i (e.g., GeForce, Nvidia).
-// gpu.{i}.fanSpeed: The current fan speed of the GPU at index i (in percentage).
-// gpu.{i}.encoderUtilization: The utilization of the GPU's encoder at index i (in percentage).
-// gpu.{i}.gpu: The overall GPU utilization at index i (in percentage).
-// gpu.{i}.memory: The GPU memory utilization at index i (in percentage).
-// gpu.{i}.memoryTotal: The total memory of the GPU at index i (in bytes).
-// gpu.{i}.memoryAllocated: The percentage of GPU memory allocated at index i.
-// gpu.{i}.memoryAllocatedBytes: The amount of GPU memory allocated at index i (in bytes).
-// gpu.{i}.temp: The temperature of the GPU at index i (in Celsius).
-// gpu.{i}.powerWatts: The power consumption of the GPU at index i (in Watts).
-// gpu.{i}.enforcedPowerLimitWatts: The enforced power limit of the GPU at index i (in Watts).
-// gpu.{i}.powerPercent: The percentage of power limit being used by the GPU at index i.
-// gpu.{i}.graphicsClock: The current graphics clock speed of the GPU at index i (in MHz).
-// gpu.{i}.memoryClock: The current memory clock speed of the GPU at index i (in MHz).
-// gpu.{i}.pcieLinkGen: The current PCIe link generation of the GPU at index i.
-// gpu.{i}.pcieLinkSpeed: The current PCIe link speed of the GPU at index i (in bits per second).
-// gpu.{i}.pcieLinkWidth: The current PCIe link width of the GPU at index i.
-// gpu.{i}.maxPcieLinkGen: The maximum PCIe link generation supported by the GPU at index i.
-// gpu.{i}.maxPcieLinkWidth: The maximum PCIe link width supported by the GPU at index i.
-// gpu.{i}.cudaCores: The number of CUDA cores in the GPU at index i.
-// gpu.{i}.architecture: The architecture of the GPU at index i (e.g., Ampere, Turing).
-// gpu.process.{i}.*: Various metrics specific to the monitored process 
-//    (if the GPU is in use by the process). These include GPU utilization, memory utilization, 
-//     temperature, and power consumption.
-// _timestamp: The Unix timestamp when the metrics were collected.
+    /// Sampling interval in seconds
+    #[arg(short, long, default_value_t = 1)]
+    interval: u64,
+}
 
-// Note that {i} represents the index of each GPU in the system, starting from 0.
+/// Struct to hold GPU metrics. Metrics are stored in a BTreeMap to ensure
+/// consistent ordering of keys in the output JSON.
+/// The output map is flat to make it easier to parse in downstream applications.
+/// cuda_version: The version of CUDA installed on the system.
+/// gpu.count: The total number of GPUs detected in the system.
+/// gpu.{i}.name: The name of the GPU at index i (e.g., Tesla T4).
+/// gpu.{i}.brand: The brand of the GPU at index i (e.g., GeForce, Nvidia).
+/// gpu.{i}.fanSpeed: The current fan speed of the GPU at index i (in percentage).
+/// gpu.{i}.encoderUtilization: The utilization of the GPU's encoder at index i (in percentage).
+/// gpu.{i}.gpu: The overall GPU utilization at index i (in percentage).
+/// gpu.{i}.memory: The GPU memory utilization at index i (in percentage).
+/// gpu.{i}.memoryTotal: The total memory of the GPU at index i (in bytes).
+/// gpu.{i}.memoryAllocated: The percentage of GPU memory allocated at index i.
+/// gpu.{i}.memoryAllocatedBytes: The amount of GPU memory allocated at index i (in bytes).
+/// gpu.{i}.temp: The temperature of the GPU at index i (in Celsius).
+/// gpu.{i}.powerWatts: The power consumption of the GPU at index i (in Watts).
+/// gpu.{i}.enforcedPowerLimitWatts: The enforced power limit of the GPU at index i (in Watts).
+/// gpu.{i}.powerPercent: The percentage of power limit being used by the GPU at index i.
+/// gpu.{i}.graphicsClock: The current graphics clock speed of the GPU at index i (in MHz).
+/// gpu.{i}.memoryClock: The current memory clock speed of the GPU at index i (in MHz).
+/// gpu.{i}.pcieLinkGen: The current PCIe link generation of the GPU at index i.
+/// gpu.{i}.pcieLinkSpeed: The current PCIe link speed of the GPU at index i (in bits per second).
+/// gpu.{i}.pcieLinkWidth: The current PCIe link width of the GPU at index i.
+/// gpu.{i}.maxPcieLinkGen: The maximum PCIe link generation supported by the GPU at index i.
+/// gpu.{i}.maxPcieLinkWidth: The maximum PCIe link width supported by the GPU at index i.
+/// gpu.{i}.cudaCores: The number of CUDA cores in the GPU at index i.
+/// gpu.{i}.architecture: The architecture of the GPU at index i (e.g., Ampere, Turing).
+/// gpu.process.{i}.*: Various metrics specific to the monitored process
+///    (if the GPU is in use by the process). These include GPU utilization, memory utilization,
+///     temperature, and power consumption.
+/// _timestamp: The Unix timestamp when the metrics were collected.
+///
+/// Note that {i} represents the index of each GPU in the system, starting from 0.
 #[derive(Serialize)]
 struct GpuMetrics {
     #[serde(flatten)]
     metrics: BTreeMap<String, serde_json::Value>,
 }
 
-// Function to get child process IDs for a given parent PID
+/// Function to get child process IDs for a given parent PID
 fn get_child_pids(pid: i32) -> Vec<i32> {
     let output = Command::new("pgrep")
         .args(&["-P", &pid.to_string()])
@@ -72,7 +84,7 @@ fn get_child_pids(pid: i32) -> Vec<i32> {
         .collect()
 }
 
-// Function to check if a GPU is being used by a specific process or its children
+/// Function to check if a GPU is being used by a specific process or its children
 fn gpu_in_use_by_process(device: &Device, pid: i32) -> bool {
     let our_pids: Vec<i32> = std::iter::once(pid).chain(get_child_pids(pid)).collect();
 
@@ -88,13 +100,45 @@ fn gpu_in_use_by_process(device: &Device, pid: i32) -> bool {
     our_pids.iter().any(|&p| device_pids.contains(&p))
 }
 
-// Fallback function to return minimal metrics when NVML fails
+/// Fallback function to return minimal metrics when NVML fails/is not available
 fn sample_metrics_fallback() -> GpuMetrics {
     let mut metrics = BTreeMap::new();
     metrics.insert("gpu.count".to_string(), json!(0));
     GpuMetrics { metrics }
 }
-// Main function to sample GPU metrics
+/// Samples GPU metrics using NVML.
+///
+/// This function collects various metrics from all available GPUs, including
+/// utilization, memory usage, temperature, and power consumption. It also
+/// checks if the specified process is using each GPU and collects process-specific
+/// metrics if applicable.
+///
+/// # Arguments
+///
+/// * `nvml` - A reference to the initialized NVML instance.
+/// * `pid` - The process ID to monitor for GPU usage.
+/// * `cuda_version` - A string representing the CUDA version.
+///
+/// # Returns
+///
+/// Returns a `Result` containing `GpuMetrics` if successful, or an `NvmlError` if
+/// an error occurred while sampling metrics.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// * NVML fails to retrieve device information
+/// * Any of the metric collection operations fail
+///
+/// # Examples
+///
+/// ```
+/// let nvml = Nvml::init().unwrap();
+/// let pid = 1234;
+/// let cuda_version = "11.2".to_string();
+/// let metrics = sample_metrics(&nvml, pid, cuda_version).unwrap();
+/// println!("GPU Count: {}", metrics.metrics["gpu.count"]);
+/// ```
 fn sample_metrics(nvml: &Nvml, pid: i32, cuda_version: String) -> Result<GpuMetrics, NvmlError> {
     let mut metrics = BTreeMap::new();
 
@@ -192,7 +236,6 @@ fn sample_metrics(nvml: &Nvml, pid: i32, cuda_version: String) -> Result<GpuMetr
             }
         }
 
-        // New metrics
         let graphics_clock = device.clock_info(Clock::Graphics)?;
         metrics.insert(format!("gpu.{}.graphicsClock", di), json!(graphics_clock));
 
@@ -232,13 +275,11 @@ fn sample_metrics(nvml: &Nvml, pid: i32, cuda_version: String) -> Result<GpuMetr
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let nvml_result = nvml_wrapper::Nvml::init();
+    // Parse command-line arguments
+    let args = Args::parse();
 
-    let pid = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "0".to_string())
-        .parse()
-        .unwrap_or(0);
+    // Initialize NVML
+    let nvml_result = nvml_wrapper::Nvml::init();
 
     // Set up a flag to control the main sampling loop
     let running = Arc::new(AtomicBool::new(true));
@@ -247,13 +288,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set up signal handler for graceful shutdown
     let mut signals = Signals::new(TERM_SIGNALS)?;
     thread::spawn(move || {
-        for sig in signals.forever() {
+        for _sig in signals.forever() {
             r.store(false, Ordering::Relaxed);
             break;
         }
     });
 
+    // Main sampling loop. Will run until the parent process is no longer alive or a signal is received.
     while running.load(Ordering::Relaxed) {
+        // Check if parent process is still alive
+        if getppid() == nix::unistd::Pid::from_raw(args.pid) {
+            break;
+        }
+
         let sampling_start = Instant::now();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -269,7 +316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         nvml_wrapper::cuda_driver_version_major(cuda_version),
                         nvml_wrapper::cuda_driver_version_minor(cuda_version)
                     );
-                    match sample_metrics(nvml, pid, cuda_version) {
+                    match sample_metrics(nvml, args.pid, cuda_version) {
                         Ok(metrics) => metrics,
                         Err(_) => sample_metrics_fallback(),
                     }
@@ -290,13 +337,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Sleep to maintain requested sampling interval
         let loop_duration = sampling_start.elapsed();
-        if loop_duration < Duration::from_secs(1) {
-            thread::sleep(Duration::from_secs(1) - loop_duration);
-        }
-
-        // Check if parent process is still alive
-        if getppid() == nix::unistd::Pid::from_raw(pid) {
-            break;
+        if loop_duration < Duration::from_secs(args.interval) {
+            thread::sleep(Duration::from_secs(args.interval) - loop_duration);
         }
     }
 
