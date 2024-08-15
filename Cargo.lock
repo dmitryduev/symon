@@ -624,20 +624,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
 
 [[package]]
-name = "nvidia_gpu_stats"
-version = "0.1.1"
-dependencies = [
- "clap",
- "nix",
- "nvml-wrapper",
- "sentry",
- "serde",
- "serde_json",
- "signal-hook",
- "sysinfo",
-]
-
-[[package]]
 name = "nvml-wrapper"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1245,6 +1231,20 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "symon"
+version = "0.1.1"
+dependencies = [
+ "clap",
+ "nix",
+ "nvml-wrapper",
+ "sentry",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "sysinfo",
+]
 
 [[package]]
 name = "syn"
